@@ -476,12 +476,3 @@ plot(greenmeancvmask6 ~ rcv6, data = pts_dat6, ylab = "green-up mean cv", xlab =
 
 There does not appear to be a relationship between the CV of green-up (planting
 date) and the CV of rainfall. The two differing methods of green-up CV calculations did not lend differing results. However, our analysis was carried out at 500 meter resolution. Different scales of analysis could yield different results, especially for smaller community farms. 
-
-
-
-
-
-
-
-
-
