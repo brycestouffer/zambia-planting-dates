@@ -10,7 +10,7 @@ output: html_document
 ### 1. Summary 
 Do farming communities in areas with higher rainfall variability show higher variability between farmers in terms of when crops are planted? If so, this could portray a community-level adaptive response for dealing with climatic uncertainty.
 
-This analysis will utilize remotely sensed datasets: NDVI time series, gridded rainfall datasets, and a cropland mask. The NDVI time series are processed into values that identify the date of green-up over ~18 years. The rainfall data will be used to calculate the coefficient of variation (CV) of rainfall in the first 2 months of the growing season, and the long-term mean rainfall. Comparing croplands from areas of similar mean rainfall, we will see if there is a relationship between CV of rainfall and CV of green-up date.
+This analysis will utilize remotely sensed datasets: NDVI time series, gridded rainfall datasets, and a cropland mask. The NDVI time series are processed into values that identify the date of green-up over ~18 years (our planting date proxy). The rainfall data will be used to calculate the coefficient of variation (CV) of rainfall in the first 2 months of the growing season, and the long-term mean rainfall. Comparing croplands from areas of similar mean rainfall, we will see if there is a relationship between CV of rainfall and CV of green-up date.
 
 ### Primary Objectives
 
