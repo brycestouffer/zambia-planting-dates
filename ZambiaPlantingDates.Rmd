@@ -1,0 +1,487 @@
+---
+title: "Understanding Farm Planting Dates in Zambia"
+author: "Bryce Stouffer & Ryan Kopper"
+date: "May 2, 2019"
+output: html_document
+---
+
+## **Do farming communities vary their planting dates to adapt to rainfall uncertainty?**
+
+### 1. Summary 
+Do farming communities in areas with higher rainfall variability show higher variability between farmers in terms of when crops are planted? If so, this could portray a community-level adaptive response for dealing with climatic uncertainty.
+
+This analysis will utilize remotely sensed datasets: NDVI time series, gridded rainfall datasets, and a cropland mask. The NDVI time series are processed into values that identify the date of green-up over ~18 years. The rainfall data will be used to calculate the coefficient of variation (CV) of rainfall in the first 2 months of the growing season, and the long-term mean rainfall. Comparing croplands from areas of similar mean rainfall, we will see if there is a relationship between CV of rainfall and CV of green-up date.
+
+### Primary Objectives
+
+ 1. Obtain data (green-up and rainfall)
+ 2. Use rainfall data to: 
+    + Calculate the coefficient of variation (CV) of weekly rainfall across the 2000-2018 growing season.
+    + Calculate the long-term mean rainfall.
+    + Divide Zambia into zones based on long-term mean rainfall.
+ 3. Use green-up data to:
+    + Calculate the pixel-wise coefficient of variation (CV) of green-up in for the ~18 year time span (2000-2018) cropping seasons.
+    + Calculate the pixel-wise mean of green-up for the ~18 year time span (2000-2018) cropping seasons. Then aggregate using CV function.
+4. Determine if there is a relationship between CV of rainfall during the growing season and the CV of green-up date (pixel-wise or aggregate).
+
+### Data and Libraries
+
+Data for this project can be downloaded here:
+https://drive.google.com/drive/folders/1OZIRP-M8agu4Gyq_HFAXqrwzyNMxffaD 
+
+```{r}
+library(geospaar)
+library(googledrive)
+library(data.table)
+library(parallel)
+library(foreach)
+library(doParallel)
+library(raster)
+#Mac users
+#library(doMC)
+
+#reading in the planting dates data (green-up)
+PD <- dir(path ="C:/Users/bstouffer/Desktop/Geospaar/plantingdatecv/data/Estimated_Planting_Date_2000-2018/", pattern = ".tif", full.names = TRUE)
+
+#creating planting date raster
+PD_ras <- lapply(PD, raster)
+PD_stack <- brick(PD_ras)
+
+#reading in cropmask data
+cropmask <- raster(file.path("C:/Users/bstouffer/Desktop/Geospaar/plantingdatecv/data/CropZmb1V1_2015_16_fullagree.tif"))
+
+#testing rainfall data
+chrpsf <- list.files("C:/Users/bstouffer/Desktop/Geospaar/plantingdatecv/data/chirps", full.names = TRUE)
+chrps <- lapply(chrpsf, brick)
+```
+
+### Processing the rainfall data
+
+The rainfall data was aqcuired from Google Earth Engine. That code can be found
+here: https://code.earthengine.google.com/4d8ad06c67e84615e61e4a9d539c1432. 
+The rainfall data from Google Earth Engine is processed into weekly data from 
+daily. Depending on your operating system, the libraries needed may vary. 
+The code below is for Windows.
+
+```{r}
+#subsetting the rainfall data to the growing season
+yrs <- 2000:2018
+wks <- lapply(1:length(chrps), function(x) {  # x <- 1
+  drng <- as.Date(paste0(c(yrs[x], yrs[x] + 1), "-", c("10-01", "01-15")))
+  dts <- seq.Date(drng[1], drng[2], by = "day")
+  if(length(dts) != nlayers(chrps[[x]])) stop("Mismatch", call. = FALSE)
+  DT <- data.table("ind" = 0, "dts" = dts, "yrs" = year(dts), 
+                   "wk" = isoweek(dts))
+  DT[wk %in% c(1:2, 40:52), ind := 1]
+})
+
+#pulling out full weeks of rainfall data
+detectCores()
+registerDoParallel(8)
+
+wkly_rfl <- foreach(i = 1:length(chrps)) %do% {
+  wkly_rf <- lapply(c(40:52, 1:2), function(y) {  # i <- 10; y <- 44
+    ind <- which(wks[[i]]$ind == 1 & wks[[i]]$wk == y)
+    # wks[[i]][ind, ]
+    r <- raster::calc(chrps[[i]][[ind]], sum)
+  })
+  s <- stack(wkly_rf)
+}
+```
+
+### The CV for green-up calculations
+
+Green-up dates are first masked to cropland in Zambia. Then they are calculated
+and aggregated. 
+
+```{r}
+#projecting the cropland mask
+cropmask_proj_green <- projectRaster(from = cropmask, to = PD_stack)
+
+#reclassing mask based on probabilities of cropland
+#cropland mask is based on another analysis where NDVI > .75 is considered cropland
+cmask_green <- reclassify(cropmask_proj_green, c(.75, 1, 1, 0, .7499, 0))
+
+#masking plantingdates to zambia
+pdmasked <- mask(x = PD_stack, mask = cmask_green, maskvalue = 0)
+pdmasked2 <- mask(x = pdmasked, mask = cmask_green)
+
+#calculating the pixel-wise green-up CV
+greencvnoagg <- calc(pdmasked2, cv) 
+
+#aggregate to same spatial resolution of rainfall
+greencv <- aggregate(x = greencvnoagg, fact = 2)
+plot(greencv, main = "Green-up CV")
+
+#greenup CV pixel wise mean, then aggregate with CV function
+greenmean <- calc(pdmasked2, mean)
+greenmeancv <- aggregate(x = greenmean, fact = 2, method = "cv")
+plot(greenmeancv, main = "Green-up Mean Aggregated CV")
+```
+
+### Rainfall masked to cropland
+
+```{r}
+#masking rainfall to zambia's cropland
+cropmask_proj <- resample(x = cropmask_proj_green, y = greencv)
+cmask <- reclassify(cropmask_proj, c(.75, 1, 1, 0, .7499, 0))
+
+wkly_rfl <- lapply(1:length(wkly_rfl), function(z) {
+  resample(x = wkly_rfl[[z]], y = greencv)
+})
+
+rainfallmasked <- lapply(1:length(wkly_rfl), function(y) {
+    mask(x = wkly_rfl[[y]], mask = cmask, maskvalue = 0)
+})
+rainfallmasked2 <- lapply(1:length(wkly_rfl), function(y) {
+    mask(x = rainfallmasked[[y]], mask = cmask)
+})
+
+plot(rainfallmasked2[[1]][[1]], main = "Week 1 Rainfall Year 2000")
+```
+
+### Calculating longterm mean of annual rainfall
+
+```{r}
+#mean annual rainfall with mask
+annual_rfl_masked <- calc(stack(lapply(rainfallmasked2, function(x) calc(x, sum))), mean)
+plot(annual_rfl_masked)
+```
+
+### Calculating the mean weekly CV of rainfall across all growing seasons
+
+```{r}
+rf_weekly_cv_masked <- calc(stack(lapply(rainfallmasked2, function(x) {
+  calc(x, cv)
+})), mean)
+
+plot(rf_weekly_cv_masked, main = "Mean Weekly CV Across All Growing Seasons")
+```
+
+### Examining the relationship between green-up and rainfall CV across all of Zambia
+
+```{r}
+#Linear model test, green-up CV (pixel-wise) & weekly CV average across all growing seasons
+#Using cropland probability as weights
+names(greencv) <- "greencv"
+
+pts <- rasterToPoints(greencv, sp = TRUE) %>% st_as_sf
+pts <- pts %>% mutate(rcv = raster::extract(x = rf_weekly_cv_masked, y = .))
+pts <- pts %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat <- bind_cols(pts %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts) %>% as_tibble) %>% drop_na
+
+greenlm <- lm(greencv ~ rcv, data = pts_dat, weights = pts_dat$wts)
+summary(greenlm)
+plot(greencv ~ rcv, data = pts_dat, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+### Dividing Zambia into zones based on longterm mean annual rainfall
+
+The scale ranges from 1 (low) to 6 (high).
+
+```{r}
+qtiles <- quantile(annual_rfl_masked, probs = seq(0, 1, 1 / 6))
+raintotcut <- cut(x = annual_rfl_masked, breaks = qtiles, include.lowest = TRUE)
+plot(raintotcut)
+```
+
+### Examining the relationship between green-up CV in each rainfall zone
+
+Cropland probability are used as weights for all models.
+
+#### Zone 1
+
+```{r}
+#masking greenup and weekly rainfall based on longterm avg
+noone <- subs(raintotcut, data.frame(from=c(2, 3, 4, 5, 6), 1))
+greencvmask1 <- mask(x = greencv, mask = noone, maskvalue = 1)
+plot(greencvmask1)
+rf_weekly_cv_masked1 <- mask(x = rf_weekly_cv_masked, mask = noone, maskvalue = 1)
+plot(rf_weekly_cv_masked1)
+
+#lm for class 1 (low) longterm rainfall crop areas (pixel-wise green-up)
+#using cropland probability as weights
+names(greencvmask1) <- "greencvmask1"
+pts1 <- rasterToPoints(greencvmask1, sp = TRUE) %>% st_as_sf
+pts1 <- pts1 %>% mutate(rcv1 = raster::extract(x = rf_weekly_cv_masked1, y = .)) 
+pts1 <- pts1 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat1 <- bind_cols(pts1 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts1) %>% as_tibble) %>% drop_na
+
+greenlm1 <- lm(greencvmask1 ~ rcv1, data = pts_dat1, weights = pts_dat1$wts)
+summary(greenlm1)
+plot(greencvmask1 ~ rcv1, data = pts_dat1)
+plot(greencvmask1 ~ rcv1, data = pts_dat1, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+#### Using green-up mean (aggregated CV)
+
+```{r}
+#masking greenup and weekly rainfall based on longterm avg
+noone <- subs(raintotcut, data.frame(from=c(2, 3, 4, 5, 6), 1))
+greenmeancvmask1 <- mask(x = greenmeancv, mask = noone, maskvalue = 1)
+plot(greenmeancvmask1)
+rf_weekly_cv_masked1 <- mask(x = rf_weekly_cv_masked, mask = noone, maskvalue = 1)
+plot(rf_weekly_cv_masked1)
+
+#class 1
+names(greenmeancvmask1) <- "greenmeancvmask1"
+pts1 <- rasterToPoints(greenmeancvmask1, sp = TRUE) %>% st_as_sf
+pts1 <- pts1 %>% mutate(rcv1 = raster::extract(x = rf_weekly_cv_masked1, y = .)) 
+pts1 <- pts1 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat1 <- bind_cols(pts1 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts1) %>% as_tibble) %>% drop_na
+
+#lm for class 1 (low) longterm rainfall crop areas
+greenmeanlm1 <- lm(greenmeancvmask1 ~ rcv1, data = pts_dat1, weights = pts_dat1$wts)
+summary(greenmeanlm1)
+plot(greenmeancvmask1 ~ rcv1, data = pts_dat1, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+
+#### Zone 2
+
+```{r}
+#class 2
+notwo <- subs(raintotcut, data.frame(from=c(1, 3, 4, 5, 6), 1))
+greencvmask2 <- mask(x = greencv, mask = notwo, maskvalue = 1)
+plot(greencvmask2)
+rf_weekly_cv_masked2 <- mask(x = rf_weekly_cv_masked, mask = notwo, maskvalue = 1)
+plot(rf_weekly_cv_masked2)
+
+#lm for class 2 longterm rainfall crop areas (pixel-wise green-up)
+names(greencvmask2) <- "greencvmask2"
+pts2 <- rasterToPoints(greencvmask2, sp = TRUE) %>% st_as_sf
+pts2 <- pts2 %>% mutate(rcv2 = raster::extract(x = rf_weekly_cv_masked2, y = .)) 
+pts2 <- pts2 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat2 <- bind_cols(pts2 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts2) %>% as_tibble) %>% drop_na
+
+greenlm2 <- lm(greencvmask2 ~ rcv2, data = pts_dat2, weights = pts_dat2$wts)
+summary(greenlm2)
+plot(greencvmask2 ~ rcv2, data = pts_dat2, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+#### Using green-up mean (aggregated CV)
+
+```{r}
+#class 2
+notwo <- subs(raintotcut, data.frame(from=c(1, 3, 4, 5 ,6), 1))
+greenmeancvmask2 <- mask(x = greenmeancv, mask = notwo, maskvalue = 1)
+plot(greenmeancvmask2)
+rf_weekly_cv_masked2 <- mask(x = rf_weekly_cv_masked, mask = notwo, maskvalue = 1)
+plot(rf_weekly_cv_masked2)
+
+#lm for class 2  longterm rainfall crop areas
+names(greenmeancvmask2) <- "greenmeancvmask2"
+pts2 <- rasterToPoints(greenmeancvmask2, sp = TRUE) %>% st_as_sf
+pts2 <- pts2 %>% mutate(rcv2 = raster::extract(x = rf_weekly_cv_masked2, y = .))
+pts2 <- pts2 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat2 <- bind_cols(pts2 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts2) %>% as_tibble) %>% drop_na
+
+greenmeanlm2 <- lm(greenmeancvmask2 ~ rcv2, data = pts_dat2, weights = pts_dat2$wts)
+summary(greenmeanlm2)
+plot(greenmeancvmask2 ~ rcv2, data = pts_dat2, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+#### Zone 3
+
+```{r}
+#class 3
+nothree <- subs(raintotcut, data.frame(from=c(1, 2, 4, 5, 6), 1))
+greencvmask3 <- mask(x = greencv, mask = nothree, maskvalue = 1)
+plot(greencvmask3)
+rf_weekly_cv_masked3 <- mask(x = rf_weekly_cv_masked, mask = nothree, maskvalue = 1)
+plot(rf_weekly_cv_masked3)
+
+#lm for class 3 longterm rainfall crop areas (pixel-wise green-up)
+names(greencvmask3) <- "greencvmask3"
+pts3 <- rasterToPoints(greencvmask3, sp = TRUE) %>% st_as_sf
+pts3 <- pts3 %>% mutate(rcv3 = raster::extract(x = rf_weekly_cv_masked3, y = .)) 
+pts3 <- pts3 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat3 <- bind_cols(pts3 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts3) %>% as_tibble) %>% drop_na
+
+greenlm3 <- lm(greencvmask3 ~ rcv3, data = pts_dat3, weights = pts_dat3$wts)
+summary(greenlm3)
+plot(greencvmask3 ~ rcv3, data = pts_dat3, ylab = "green-up cv", xlab = "rainfall cv")
+
+```
+
+#### Using green-up mean (aggregated CV)
+
+```{r}
+#class 3
+nothree <- subs(raintotcut, data.frame(from=c(1, 2, 4, 5, 6), 1))
+greenmeancvmask3 <- mask(x = greenmeancv, mask = nothree, maskvalue = 1)
+plot(greenmeancvmask3)
+rf_weekly_cv_masked3 <- mask(x = rf_weekly_cv_masked, mask = nothree, maskvalue = 1)
+plot(rf_weekly_cv_masked3)
+
+#lm for class 3  longterm rainfall crop areas
+names(greenmeancvmask3) <- "greenmeancvmask3"
+pts3 <- rasterToPoints(greenmeancvmask3, sp = TRUE) %>% st_as_sf
+pts3 <- pts3 %>% mutate(rcv3 = raster::extract(x = rf_weekly_cv_masked3, y = .))
+pts3 <- pts3 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat3 <- bind_cols(pts3 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts3) %>% as_tibble) %>% drop_na
+
+greenmeanlm3 <- lm(greenmeancvmask3 ~ rcv3, data = pts_dat3, weights = pts_dat3$wts)
+summary(greenmeanlm3)
+plot(greenmeancvmask3 ~ rcv3, data = pts_dat3, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+#### Zone 4
+
+```{r}
+#class 4
+nofour <- subs(raintotcut, data.frame(from=c(1, 2, 3, 5, 6), 1))
+greencvmask4 <- mask(x = greencv, mask = nofour, maskvalue = 1)
+plot(greencvmask4)
+rf_weekly_cv_masked4 <- mask(x = rf_weekly_cv_masked, mask = nofour, maskvalue = 1)
+plot(rf_weekly_cv_masked4)
+
+#lm for class 4  longterm rainfall crop areas (pixel-wise green-up)
+names(greencvmask4) <- "greencvmask4"
+pts4 <- rasterToPoints(greencvmask4, sp = TRUE) %>% st_as_sf
+pts4 <- pts4 %>% mutate(rcv4 = raster::extract(x = rf_weekly_cv_masked4, y = .))
+pts4 <- pts4 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat4 <- bind_cols(pts4 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts4) %>% as_tibble) %>% drop_na
+
+greenlm4 <- lm(greencvmask4 ~ rcv4, data = pts_dat4, weights = pts_dat4$wts)
+summary(greenlm4)
+plot(greencvmask4 ~ rcv4, data = pts_dat4, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+#### Using green-up mean (aggregated CV)
+
+```{r}
+#class 4
+nofour <- subs(raintotcut, data.frame(from=c(1, 2, 3, 5, 6), 1))
+greenmeancvmask4 <- mask(x = greenmeancv, mask = nofour, maskvalue = 1)
+plot(greenmeancvmask4)
+rf_weekly_cv_masked4 <- mask(x = rf_weekly_cv_masked, mask = nofour, maskvalue = 1)
+plot(rf_weekly_cv_masked4)
+
+#lm for class 4  longterm rainfall crop areas 
+names(greenmeancvmask4) <- "greenmeancvmask4"
+pts4 <- rasterToPoints(greenmeancvmask4, sp = TRUE) %>% st_as_sf
+pts4 <- pts4 %>% mutate(rcv4 = raster::extract(x = rf_weekly_cv_masked4, y = .))
+pts4 <- pts4 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat4 <- bind_cols(pts4 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts4) %>% as_tibble) %>% drop_na
+
+greenmeanlm4 <- lm(greenmeancvmask4 ~ rcv4, data = pts_dat4, weights = pts_dat4$wts)
+summary(greenmeanlm4)
+plot(greenmeancvmask4 ~ rcv4, data = pts_dat4, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+#### Zone 5 
+
+```{r}
+#class 5
+nofive <- subs(raintotcut, data.frame(from=c(1, 2, 3, 4, 6), 1))
+greencvmask5 <- mask(x = greencv, mask = nofive, maskvalue = 1)
+plot(greencvmask5)
+rf_weekly_cv_masked5 <- mask(x = rf_weekly_cv_masked, mask = nofive, maskvalue = 1)
+plot(rf_weekly_cv_masked5)
+
+#lm for class 5 longterm rainfall crop areas (pixel-wise green-up)
+names(greencvmask5) <- "greencvmask5"
+pts5 <- rasterToPoints(greencvmask5, sp = TRUE) %>% st_as_sf
+pts5 <- pts5 %>% mutate(rcv5 = raster::extract(x = rf_weekly_cv_masked5, y = .))
+pts5 <- pts5 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat5 <- bind_cols(pts5 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts5) %>% as_tibble) %>% drop_na
+
+greenlm5 <- lm(greencvmask5 ~ rcv5, data = pts_dat5, weights = pts_dat5$wts)
+summary(greenlm5)
+plot(greencvmask5 ~ rcv5, data = pts_dat5, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+#### Using green-up mean (aggregated CV)
+
+```{r}
+#class 5
+nofive <- subs(raintotcut, data.frame(from=c(1, 2, 3, 4, 6), 1))
+greenmeancvmask5 <- mask(x = greenmeancv, mask = nofive, maskvalue = 1)
+plot(greenmeancvmask5)
+rf_weekly_cv_masked5 <- mask(x = rf_weekly_cv_masked, mask = nofive, maskvalue = 1)
+plot(rf_weekly_cv_masked5)
+
+#lm for class 5 longterm rainfall crop areas
+names(greenmeancvmask5) <- "greenmeancvmask5"
+pts5 <- rasterToPoints(greenmeancvmask5, sp = TRUE) %>% st_as_sf
+pts5 <- pts5 %>% mutate(rcv5 = raster::extract(x = rf_weekly_cv_masked5, y = .))
+pts5 <- pts5 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat5 <- bind_cols(pts5 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts5) %>% as_tibble) %>% drop_na
+
+greenmeanlm5 <- lm(greenmeancvmask5 ~ rcv5, data = pts_dat5, weights = pts_dat5$wts)
+summary(greenmeanlm5)
+plot(greenmeancvmask5 ~ rcv5, data = pts_dat5, ylab = "green-up mean cv", xlab = "rainfall cv")
+```
+
+#### Zone 6
+
+```{r}
+#class 6
+nosix <- subs(raintotcut, data.frame(from=c(1, 2, 3, 4, 5), 1))
+greencvmask6 <- mask(x = greencv, mask = nosix, maskvalue = 1)
+plot(greencvmask6)
+rf_weekly_cv_masked6 <- mask(x = rf_weekly_cv_masked, mask = nosix, maskvalue = 1)
+plot(rf_weekly_cv_masked6)
+
+#lm for class 6 (high) longterm rainfall crop areas (pixel-wise green-up)
+names(greencvmask6) <- "greencvmask6"
+pts6 <- rasterToPoints(greencvmask6, sp = TRUE) %>% st_as_sf
+pts6 <- pts6 %>% mutate(rcv6 = raster::extract(x = rf_weekly_cv_masked6, y = .))
+pts6 <- pts6 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat6 <- bind_cols(pts6 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts6) %>% as_tibble) %>% drop_na
+
+greenlm6 <- lm(greencvmask6 ~ rcv6, data = pts_dat6, weights = pts_dat6$wts)
+summary(greenlm6)
+plot(greencvmask6 ~ rcv6, data = pts_dat6, ylab = "green-up cv", xlab = "rainfall cv")
+```
+
+#### Using green-up mean (aggregated CV)
+
+```{r}
+#class 6
+nosix <- subs(raintotcut, data.frame(from=c(1, 2, 3, 4, 5), 1))
+greenmeancvmask6 <- mask(x = greenmeancv, mask = nosix, maskvalue = 1)
+plot(greenmeancvmask6)
+rf_weekly_cv_masked6 <- mask(x = rf_weekly_cv_masked, mask = nosix, maskvalue = 1)
+plot(rf_weekly_cv_masked6)
+
+#lm for class 6 (high) longterm rainfall crop areas
+names(greenmeancvmask6) <- "greenmeancvmask6"
+pts6 <- rasterToPoints(greenmeancvmask6, sp = TRUE) %>% st_as_sf
+pts6 <- pts6 %>% mutate(rcv6 = raster::extract(x = rf_weekly_cv_masked6, y = .)) 
+pts6 <- pts6 %>% mutate(wts = raster::extract(x = cropmask_proj, y = .))
+pts_dat6 <- bind_cols(pts6 %>% data.frame %>% select(-geometry) %>% as_tibble, 
+                     st_coordinates(pts6) %>% as_tibble) %>% drop_na
+
+greenmeanlm6 <- lm(greenmeancvmask6 ~ rcv6, data = pts_dat6, weights = pts_dat6$wts)
+summary(greenmeanlm6)
+plot(greenmeancvmask6 ~ rcv6, data = pts_dat6, ylab = "green-up mean cv", xlab = "rainfall cv")
+```
+
+
+### Conclusion
+
+There does not appear to be a relationship between the CV of green-up (planting
+date) and the CV of rainfall. The two differing methods of green-up CV calculations did not lend differing results. However, our analysis was carried out at 500 meter resolution. Different scales of analysis could yield different results, especially for smaller community farms. 
+
+
+
+
+
+
+
+
+
